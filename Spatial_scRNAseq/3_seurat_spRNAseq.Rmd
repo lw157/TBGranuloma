@@ -1,0 +1,140 @@
+---
+title: "TB spatial scRNA 4 samples"
+author: "Liuyang Wang"
+date: '`r format(Sys.time(), "%a %b %d %X %Y")`'
+output:
+  html_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 8
+    fontsize: 6pt
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# loading data
+
+```{r setup,include=FALSE, echo=FALSE}
+
+knitr::opts_chunk$set(cache = TRUE, echo=F, warning = FALSE, message = FALSE, cache.lazy = FALSE)
+
+options(future.globals.maxSize = 1024 * 1024^2)
+suppressMessages({
+  require(ggplot2)
+  require(reshape2)
+  library(Seurat)
+  require(harmony)
+  library(dplyr)
+  library(RColorBrewer)
+  require(glue)
+  require(stringr)
+  require(cowplot)
+  require(patchwork)
+  require(SeuratWrappers)
+  require(singleCellTK)
+  }
+)
+
+```
+
+
+```{r load,cache=TRUE, fig.align='center', fig.height=6, fig.width=9}
+setwd("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/")
+getPalette = colorRampPalette(brewer.pal(8, "Dark2"))
+
+mysamples = c("SP16-002655_A3", "SP19-000120_B1","SP16-040417_B3", "SR16-005712_A1")
+alldat = lapply(mysamples, function(x) {
+  tx = Load10X_Spatial(
+    data.dir = glue("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/1_process_data/{x}_count/"), slice = x );
+  #tx = SCTransform(tx, assay = "Spatial",method = "poisson",  verbose = FALSE);
+  tx$orig.ident = x ;
+  tx }
+)
+names(alldat) <- c("SP16_002655A3", "SP19_000120B1","SP16_040417B3", "SR16_005712A1")
+pbmc_merge1 <- merge(alldat$SP16_002655A3, alldat$SP16_040417B3, add.cell.ids = c("LungA3","LungB3") )
+pbmc_merge2 <- merge(alldat$SP19_000120B1, alldat$SR16_005712A1, add.cell.ids = c("PleuraB1","LymphoidA1") )
+pdat = merge(pbmc_merge1, pbmc_merge2) 
+pbmc_merge1 <- pbmc_merge2 <- NULL
+gc()
+
+pdat@meta.data$sample = stringr::str_split(rownames(pdat@meta.data) ,  pattern = "_", n = 2, simplify = T)[,1]
+names(pdat@images) <- c("LungA3","LungB3", "PleuraB1","LymphoidA1")
+
+pdat <- PercentageFeatureSet(pdat, "^mt-|^MT-|^Mt-", col.name = "percent_mito")
+#pdat <- PercentageFeatureSet(pdat, "^HB.*-", col.name = "percent_hb")
+
+VlnPlot(pdat, features = c("nCount_Spatial", "nFeature_Spatial", "percent_mito"), pt.size = 0.1, ncol = 2) + NoLegend()
+pdat <- subset(pdat, nFeature_Spatial > 300 & nCount_Spatial < 50000 & percent_mito < 20 & nFeature_Spatial < 9000 ) 
+VlnPlot(pdat, features = c("nCount_Spatial", "nFeature_Spatial", "percent_mito"), pt.size = 0.01, ncol = 2) + NoLegend()
+VlnPlot(pdat, features = c("nCount_Spatial", "nFeature_Spatial", "percent_mito"), group.by = "sample", pt.size = 0.1, ncol = 3) + NoLegend()
+SpatialFeaturePlot(pdat, features = c("nCount_Spatial", "nFeature_Spatial", "percent_mito"), alpha = c(0.6, 1), pt.size.factor = 5, ncol = 4 )
+
+```
+
+# harmonize samples
+
+```{r, fig.width=5, fig.height=5}
+pdat <- pdat %>%
+  SCTransform(verbose = FALSE,assay = "Spatial", vars.to.regress = c("nCount_Spatial","percent_mito")) %>%
+  RunPCA( verbose = FALSE, assay = "SCT")
+DefaultAssay(pdat) <- "SCT"
+pdat <- pdat %>% 
+    RunHarmony(group.by.vars = "sample", plot_convergence = F,assay.use = "SCT")
+
+harmony_embeddings <- Embeddings(pdat, 'harmony')
+options(repr.plot.height = 5, repr.plot.width = 12)
+DimPlot(pdat, reduction = "pca", label = TRUE) + NoLegend()
+DimPlot(pdat, reduction = "pca", label = TRUE, group.by = "sample") 
+DimPlot(object = pdat, reduction = "harmony", pt.size = .1)
+DimPlot(object = pdat, reduction = "harmony", pt.size = .1, group.by = "sample")
+
+
+```
+
+# clustering spots
+```{r, fig.width=8, fig.height=6}
+pdat <- pdat %>%
+  RunUMAP(reduction = "harmony", dims = 1:20) %>%
+  FindNeighbors(reduction = "harmony", dims = 1:20) %>%
+  FindClusters( resolution = 0.6) 
+
+DimPlot(pdat, reduction = "umap", label = TRUE, label.size = 8) + NoLegend()
+DimPlot(pdat, reduction = "umap", label = TRUE, group.by = "sample") + NoLegend()
+DimPlot(pdat, reduction = "umap", split.by = "sample", label = TRUE, label.size = 8) + NoLegend()
+SpatialDimPlot(pdat, label = TRUE, label.size = 4, pt.size.factor=3) + NoLegend()
+SpatialDimPlot(pdat, label = TRUE, label.size = 3, image.alpha = 0.6,pt.size.factor = 3, ncol = 4)  + NoLegend()
+
+```
+
+# Top expressed genes per cluster
+```{r, fig.height= 10,fig.width=14}
+library(future)
+plan(strategy = "multicore", workers = 7)
+
+pbmc.markers <- FindAllMarkers(pdat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+pbmc.markers <- read.csv("TB_merge4sample_cluster_AllMarkers_2023May20.csv")
+pbmc.markers %>% group_by(cluster) %>% top_n(n = 50, wt = avg_log2FC) %>%
+  DT::datatable(caption = "top 30 gene for each cluster")
+
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
+DoHeatmap(pdat, features = top10$gene) +
+  scale_fill_gradientn(colors = c("lightblue", "white", "red")) +
+  NoLegend() -> p
+ggsave("Fig_spatial_scRNAseq_17clusters_top6_2.pdf", p, width = 10, height = 10)
+
+scCustomize::Clustered_DotPlot(seurat_object = pdat, features = top10$gene, k = length(unique(pbmc.markers$cluster)))
+
+require(SeuratExtend)
+toplot <- CalcStats(pdat, features = top10$gene, method = "zscore", order = "p", n = Inf)
+Heatmap(toplot, lab_fill = "zscore") -> p
+ggsave("Fig_spatial_scRNAseq_17clusters_top6_collapsePerCluster.pdf", p, width = 6, height = 7)
+
+```
+
