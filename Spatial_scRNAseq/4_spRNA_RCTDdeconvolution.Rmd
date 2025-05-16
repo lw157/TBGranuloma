@@ -1,0 +1,275 @@
+---
+title: "TB RCTD deconvolution"
+author: "Liuyang Wang"
+date: '`r format(Sys.time(), "%a %b %d %X %Y")`'
+output:
+  html_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 8
+    fontsize: 6pt
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# loading data
+
+```{r setup,include=FALSE, echo=FALSE}
+
+knitr::opts_chunk$set(cache = TRUE, echo=F, warning = FALSE, message = FALSE, cache.lazy = FALSE)
+
+options(future.globals.maxSize = 1024 * 1024^2)
+suppressMessages({
+  require(ggplot2)
+  require(reshape2)
+  library(Seurat)
+  library(SeuratData)
+  require(harmony)
+  library(dplyr)
+  library(RColorBrewer)
+  require(glue)
+  require(stringr)
+  require(cowplot)
+  require(patchwork)
+  require(SeuratWrappers)
+  require(singleCellTK)
+  require(scCustomize)
+  require(spacexr)
+  }
+)
+library(future)
+plan("multisession", workers = 7)
+
+```
+
+# Load spatial scRNA-seq
+```{r load,cache=TRUE, fig.align='center', fig.height=6, fig.width=9}
+setwd("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/")
+getPalette = colorRampPalette(brewer.pal(8, "Dark2"))
+pdat = readRDS(file = paste0("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/2_intermediate_data/TB_4sample_combine_20230610.rds"))
+
+SpatialFeaturePlot(pdat, features = "SPP1", pt.size.factor = 50)
+VlnPlot(pdat, features = c("SPP1"), stack = T, split.by = "sample")
+
+```
+
+# load scRNA-seq reference
+```{r}
+
+ref <- readRDS("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/2_intermediate_data/Tobin_8686_sndata_vj_snRNAseq.rds")
+ref <- RenameIdents( object = ref, 
+     "0"	= "T_CD4",  "1"	= "AT2", "2"	= "Mac_IL4I1", "3" = "T_CD8_cytotoxic",
+    "4" = "Tmem_IL7R", "5"	= "Fibro_TIMP1", "6"	= "T_cell", "7"	= "Mac_STAB1",
+    "8"	= "B_MS4A1", "9"	= "Mac_GM2A", "10"	= "AT1", "11"	= "Fibro_TNXB",
+    "12" = "Endothelial", "13" ="Plasma_BAZ_SDC1", "14"	= "Mac_SPP1",
+    "15"	= "Treg_FOXP3", "16" = "Mitochondria_rich", "17"	= "ML_B",
+    "18" = "Neutrophils_S100A8", "19"	= "Mac_FABP4", "20"	= "Mast",
+    "21"="Myofibroblast_ACTA2","22"="Neutrophils_CXCL18", "23" = "Dendritic" )
+
+ref@meta.data$vj_annot = Idents(ref)
+DefaultAssay(ref) <- "RNA"
+```
+
+# RCTD deconvolution
+```{r}
+
+isams = c("LungA3", "LungB3", "LymphoidA1",   "PleuraB1" )
+ref_sams = c("SP16_002655_A3", "SP16_040417_B3", "10S_5513_H3", "10S_5513_H6")
+
+for (sam_idx in 1:4){
+  ref_obj <- Reference(counts = GetAssayData(ref, layer="counts"),   cell_types = Idents(ref))
+  pdat_tmp = subset(pdat, subset = sample==isams[sam_idx])
+  counts_hd <-GetAssayData(pdat_tmp, layer = "Spatial", slot = "counts") 
+  coords <- GetTissueCoordinates(pdat_tmp) %>% dplyr::select(where(is.numeric)) 
+  query <- SpatialRNA(coords = coords, counts = counts_hd, nUMI= colSums(counts_hd) )
+  
+  RCTD_res <- create.RCTD(query, ref_obj, max_cores = 9)
+  RCTD_res <- run.RCTD(RCTD_res, doublet_mode = "doublet")
+  saveRDS(RCTD_res, glue("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/2_intermediate_data/Tobin_8686_spdata_{isams[sam_idx]}_RCTD_DoubletMode.rds"))
+
+  outinf = RCTD_res@results$results_df %>%
+    tibble::rownames_to_column("spot")
+  write.table(outinf, file= glue("RCTD_{isams[sam_idx]}_DoubletModel_info.tsv"), sep="\t", quote=FALSE, row.names=FALSE)
+}
+
+ldat1 =lapply(isams, function(x) read.csv(glue("RCTD_{x}__DoubletModel_info.tsv"), sep="\t") %>% rownames_to_column )
+names(ldat1) <- isams
+ldat1 %>% plyr::ldply(.id = "spot") %>% #head()
+  column_to_rownames("rowname") %>%
+  select(-spot) %>% 
+  write.csv("RCTD_all4sample_deconvolution_doublet_info.csv")
+
+```
+## Summarize RCTD deconvolution using PieChart on top of seurat UMAP plot
+
+For each individual seurat cluster, a pie chart will be plotted to show the cell type composition. No spatial information is included here.
+ 
+1) Add RCTD deconvolution results to seurat and modify Seurat DimPlot to plot PieChart 
+2) plot UMAP with Seurat DimPlot and scatterpie package
+              
+```{r}
+require(tidyverse)
+library(spacexr)
+library(ggspatial)
+library(scatterpie)
+library(dplyr)
+library(glue)
+
+DimPlot_pie <- function(pdat = pdat, isam =NULL, cluster_col = NULL){
+  rctd_res = readRDS(glue("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/2_intermediate_data/Tobin_8686_spdata_{isam}_RCTD_DoubletMode.rds"))
+  weights <- rctd_res@results$weights
+  result_df = rctd_res@results$results_df
+  umap_coords <- as.data.frame(Embeddings(pdat, reduction = "umap"))
+  res_df = merge(result_df, umap_coords, by=0)
+  
+  pdat1 <- AddMetaData(subset(pdat, subset = sample ==isam ), metadata = res_df )
+
+  label_pos = pdat1@meta.data %>% 
+    group_by(seurat_clusters) %>% 
+    mutate(xmid = median(UMAP_1), ymid = median(UMAP_2)) %>% 
+    select(seurat_clusters, xmid, ymid) %>% 
+    unique()
+  
+  first_summary = pdat1@meta.data %>% 
+    select(seurat_clusters, first_type) %>% 
+    group_by(seurat_clusters,first_type) %>%
+    summarise(Count = n(),  .groups = "drop") %>% 
+    group_by(seurat_clusters) %>%
+    mutate(Total = sum(Count), value = Count / Total) %>%  
+    ungroup()
+  
+  second_summary = pdat1@meta.data %>% 
+    select(seurat_clusters, second_type) %>% 
+    group_by(seurat_clusters,second_type) %>%
+    summarise(Count = n(),  .groups = "drop") %>% 
+    group_by(seurat_clusters) %>%
+    mutate(Total = sum(Count), value = Count / Total) %>%  
+    ungroup()
+  
+  first_type_dat = merge(first_summary, label_pos, by = "seurat_clusters")
+  second_type_dat = merge(second_summary, label_pos, by = "seurat_clusters")
+
+  graphics.off()
+  DimPlot(pdat1, label = F, pt.size = 1.2)  + 
+    geom_scatterpie(data=first_type_dat, aes(x=xmid, y=ymid),
+                    cols = "first_type", pie_scale = 2, 
+                    long_format = T,color = "lightgray") +
+    ggrepel::geom_text_repel(data=first_type_dat %>% 
+        dplyr::select(seurat_clusters, xmid, ymid) %>% unique(), 
+        aes(x=xmid, y=ymid, label = seurat_clusters), 
+        size=6, nudge_x = 1, nudge_y = 1 ) +
+    scale_fill_manual(values = cluster_col, 
+                      guide = guide_legend(title = "first_type")) +
+    guides(color = "none") -> p1
+  
+  DimPlot(pdat1, label = F, pt.size = 1.2)  + 
+    geom_scatterpie(data=second_type_dat, aes(x=xmid, y=ymid),
+                    cols = "second_type", pie_scale = 2, 
+                    long_format = T,color = "lightgray") +
+    ggrepel::geom_text_repel(data= second_type_dat %>% 
+        dplyr::select(seurat_clusters, xmid, ymid) %>% unique(), 
+        aes(x=xmid, y=ymid, label = seurat_clusters), 
+        size=6, nudge_x = 1, nudge_y = 1 ) +
+    scale_fill_manual(values = cluster_col, 
+                      guide = guide_legend(title = "second_type")) +
+    guides(color = "none") -> p2
+  
+  pcomb = p1 / p2
+  ggsave(glue("Tobin_8686_spdata_{isam}_RCTD_deconvolution_UMAP_pie.pdf"), pcomb, width = 8, height = 10)
+}
+
+my_col = as.vector(pals::polychrome(24) %>% rev())
+decon_type = read.csv("RCTD_all4sample_doublet_info.csv") 
+cell_type = unique(c(decon_type$first_type, decon_type$second_type))
+clu_cluster = setNames(my_col[1:length(cell_type)], cell_type)
+
+isams = c("LungA3", "LungB3", "LymphoidA1",   "PleuraB1" )
+for(i_sam in isams){
+  print(i_sam)
+  DimPlot_pie(pdat = pdat, isam = i_sam, cluster_col = clu_cluster )
+}
+
+```
+
+## Summarize RCTD deconvolution results using PieChart for each spatial spot 
+
+Here a pie chart will be plotted to show the cell type composition for each spot. Spatial coordinates are included here.
+             
+```{r}
+plot_rctd_pie <- function( pdat1=pdat1, isam = "LungA3", file_path="./", cell_type_colors = my_col) {
+  
+  # Load and validate RCTD data
+  myRCTD <- readRDS(glue("{file_path}/Tobin_8686_spdata_{isam}_RCTD_DoubletMode.rds"))
+  if (myRCTD@config$RCTDmode != "doublet") stop("RCTD not in doublet mode.")
+  
+  # Prepare data
+  coords = GetTissueCoordinates(pdat1, image = isam, scale = "lowres")
+  weigh_df = data.frame(barcode = rownames(myRCTD@results$results_df),
+      first_type = myRCTD@results$results_df$first_type,
+      second_type = myRCTD@results$results_df$second_type,
+      first_weight = normalize_weights(myRCTD@results$weights_doublet)[, 1],
+      second_weight = normalize_weights(myRCTD@results$weights_doublet)[, 2]
+      )
+  
+  plot_data <- merge(coords, weigh_df, by.x = "row.names", by.y = "barcode") %>% 
+    rename(barcode = 1) %>%
+    mutate(negimagerow = -imagerow,
+           total_weight = first_weight + second_weight,
+           first_weight = first_weight / total_weight,
+           second_weight = second_weight / total_weight)
+  
+  # Scale coordinates
+  scale_factor <- pdat1@images[[isam]]@scale.factors$lowres
+  plot_data$negimagerow <- plot_data$negimagerow * scale_factor
+  plot_data$imagecol <- plot_data$imagecol * scale_factor
+  
+  # Convert to long format
+  plot_data_long <- rbind(
+    dplyr::select(plot_data, barcode, negimagerow, imagecol, rctd_type = first_type, value = first_weight),
+    dplyr::select(plot_data, barcode, negimagerow, imagecol, rctd_type = second_type, value = second_weight)
+  ) 
+  plot_data_long$rctd_type <- factor(plot_data_long$rctd_type)
+
+  image_dims <- dim(pdat1@images[[isam]]@image)
+  
+  p <- ggplot() +
+    annotation_raster(pdat1@images[[isam]]@image, 
+                      xmin = 0, xmax = image_dims[2] * scale_factor, 
+                      ymin = -image_dims[1] * scale_factor, ymax = 0) +
+    geom_scatterpie(data = plot_data_long, 
+                    aes(x = imagecol, y = negimagerow, r = 0.4), 
+                    cols = "rctd_type", long_format = TRUE, color = NA) +
+    scale_fill_manual(values = cell_type_colors) +
+    coord_fixed() +
+    labs(title = paste("RCTD -", isam)) +
+    theme_void() +
+    guides(fill = guide_legend(ncol = 2))
+  return(p)
+}
+
+
+isams = c("LungA3", "LungB3", "LymphoidA1","PleuraB1")
+prefix_path = "/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/2_intermediate_data/"
+
+my_col = as.vector(pals::polychrome(24) %>% rev())
+decon_type = read.csv("RCTD_all4sample_doublet_info.csv") 
+cell_type = unique(c(decon_type$first_type, decon_type$second_type))
+clu_cluster = setNames(my_col[1:length(cell_type)], cell_type)
+
+for (idx in 1:4){
+  p = plot_rctd_pie( pdat1=pdat, isam = isams[idx], file_path=prefix_path, cell_type_colors = clu_cluster)
+  ggsave(glue("{isams[idx]}_RCTDdoublet_spatial_pieplot.pdf"), width = 12, height = 8, dpi = 300)
+}
+
+
+```
+
+              
+              
