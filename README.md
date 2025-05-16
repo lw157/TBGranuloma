@@ -1,2 +1,3 @@
 # TBGranuloma
-scripts for Lung Granuloma -- Charlie et al. 2025 mBio
+This repository contains scripts for Granuloma -- Charlie et al. 2025 mBio.
+
