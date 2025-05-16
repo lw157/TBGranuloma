@@ -1,0 +1,199 @@
+---
+title: "Bulk RNA-seq Analysis"
+author: "Liuyang Wang"
+date: '`r format(Sys.time(), "%a %b %d %X %Y")`'
+output:
+  html_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 8
+    fontsize: 6pt
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Introduction
+
+Compare WT vs KO
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Suppress loading messages when building the HTML
+
+suppressMessages({
+  require(clusterProfiler)
+  require("scales")
+  library("ggplot2");
+  library("RColorBrewer");
+  require("DESeq2") ## "require" can give you warning if package is missing, but "library" will not 
+  require("data.table")
+  require(kableExtra)
+  require(knitr)
+  require(pheatmap)
+  require(readr)
+  require(cowplot)
+  require(ggsci)
+  require("DESeq2")  
+  require(org.Hs.eg.db)
+  require(dplyr)
+  require(tidyverse)
+  require(ggrepel)
+  require(glue)
+  library("BiocParallel")
+})
+
+knitr::opts_chunk$set(echo = F, warning = F,message = F, cache = FALSE,fig.align='center', fig.width=8, fig.height=6 )
+
+setwd("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/")
+```
+
+
+# bulk RNAseq design and QC
+```{r}
+gtf_file <- "/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/larve_zebrafish_bulkRNAseq/salmon_output/genes.gtf.gz"
+gtf <- rtracklayer::import(gtf_file)
+gtf_df<- as.data.frame(gtf)
+tx2gene<- gtf_df %>%
+         filter(type == "transcript") %>%
+         select(transcript_id, gene_name) %>% 
+   unique()
+write.csv(tx2gene, "tx2gene_zebrafish_GRCz11.csv", row.names = FALSE)
+
+```
+
+```{r}
+require(tximport)
+
+tx2gene = read.csv("tx2gene_zebrafish_GRCz11.csv", header = T)
+dat_dir = "/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/"
+lfile = list.dirs(glue(dat_dir, "larve_zebrafish_bulkRNAseq/salmon_output/"),   full.names = TRUE, recursive = F)
+files <- file.path(lfile, "quant.sf.gz" )
+
+names(files) <- gsub( "_salmon", "", basename(lfile))
+txi.salmon <- tximport(files, type = "salmon", 
+                       tx2gene = tx2gene,
+                       countsFromAbundance = "lengthScaledTPM", 
+                       txOut = F)
+
+meta = data.frame(samplename = names(files) ) %>%
+   separate(samplename, c("sampleID","seq_run"), "_", remove = F) %>% 
+   mutate(seq_run = paste0("run_", seq_run))
+ rownames(meta)<- meta$samplename
+
+write.csv(meta, "zebrafish_meta.csv")
+meta = read.csv("zebrafish_metadata.csv", row.names = 1)
+
+DT::datatable(meta, caption = "meta data")
+
+```
+
+
+# DEGs
+## Group 5 (Double positive Infect) vs Group 4 (Red positive)
+```{r}
+
+igrp = c("Infect_red", "Infect_redgreen" )
+sampleid = meta %>% filter(group %in% igrp) %>% pull(samplename)
+
+dds <- DESeqDataSetFromTximport(txi.salmon, meta, ~ group)
+
+dds <- dds[, sampleid]
+dds$group = droplevels(dds$group)
+dds$group <- relevel(dds$group, ref = igrp[1])
+keep = apply(counts(dds), 1, function(x) sum(x>3) > 2) 
+print("keep genes with counts > 3 in at least 3 sample")
+print(table(keep))
+
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+ncts <- counts(dds, normalized=TRUE)
+
+rld <- rlog(dds)
+vsd = vst(dds)
+             
+## PCA on all genes
+DESeq2::plotPCA(rld, intgroup = "group", ntop = 500) +
+ #xlim(-80, 80) + ylim(-50, 50) +
+ #stat_ellipse( geom="polygon") +
+ scale_color_brewer(palette = "Set2", direction = 1) +
+ #scale_fill_brewer(palette = "Set2", direction = -1) +
+ ggprism::theme_prism()  + #labs(x="PC1 (70%)", y="PC2 (12%)") +
+theme(legend.position = "top") -> p
+print(p)
+
+res <- results(dds, contrast = c("group", igrp[2], igrp[1]) )
+
+res %>% as.data.frame() %>% #head()
+  merge(ncts[,sampleid], by=0) %>% 
+  arrange(padj) -> res_dat
+
+DT::datatable(res_dat, caption = "DEGs table")
+
+EnhancedVolcano::EnhancedVolcano(res_dat, x = "log2FoldChange", y="padj", lab = res_dat$Row.names,pCutoff = 0.05) +
+  theme_classic()
+
+top50gene <- res_dat %>% arrange(padj) %>% pull(Row.names) %>% head(50)
+mat <- assay(vsd)[which(rownames(assay(vsd)) %in% top50gene) , ]
+pheatmap::pheatmap(mat, annotation_col = colData(dds)[,c("samplename","group")] %>% as.data.frame(), main = "top 50 genes", scale = "row",cluster_rows = TRUE,cluster_cols = FALSE, colorRampPalette(alpha(brewer.pal(n = 7, name = "YlOrBr"), alpha=0.9))(50)) 
+
+write.csv(res_dat, glue("zebrafish_DEGs_{igrp[2]}_vs_{igrp[1]}.csv"))
+
+```
+
+
+## Group 5 (Double positive Infect) vs Group 2 (CT Red)
+```{r}
+
+igrp = c("CT_red", "Infect_redgreen" )
+sampleid = meta %>% filter(group %in% igrp) %>% pull(samplename)
+
+dds <- DESeqDataSetFromTximport(txi.salmon, meta, ~ group)
+dds <- dds[, sampleid]
+dds$group = droplevels(dds$group)
+dds$group <- relevel(dds$group, ref = igrp[1])
+keep = apply(counts(dds), 1, function(x) sum(x>3) > 2) 
+print("keep genes with counts > 3 in at least 3 sample")
+print(table(keep))
+
+dds <- dds[keep, ]
+
+dds <- DESeq(dds)
+ncts <- counts(dds, normalized=TRUE)
+ncts <- counts(dds, normalized=TRUE)
+rld <- rlog(dds)
+vsd = vst(dds)
+## PCA on all genes
+DESeq2::plotPCA(rld, intgroup = "group", ntop = 500) +
+ #xlim(-80, 80) + ylim(-50, 50) +
+ #stat_ellipse( geom="polygon") +
+ scale_color_brewer(palette = "Set2", direction = 1) +
+ #scale_fill_brewer(palette = "Set2", direction = -1) +
+ ggprism::theme_prism()  + #labs(x="PC1 (70%)", y="PC2 (12%)") +
+theme(legend.position = "top") -> p
+print(p)
+res <- results(dds, contrast = c("group", igrp[2], igrp[1]) )
+
+res %>% as.data.frame() %>% #head()
+  merge(ncts[,sampleid], by=0) %>% 
+  arrange(padj) -> res_dat
+
+DT::datatable(res_dat, caption = "DEGs table")
+
+EnhancedVolcano::EnhancedVolcano(res_dat, x = "log2FoldChange", y="padj", lab = res_dat$Row.names,pCutoff = 0.05) +
+  theme_classic()
+
+top50gene <- res_dat %>% arrange(padj) %>% pull(Row.names) %>% head(50)
+mat <- assay(vsd)[which(rownames(assay(vsd)) %in% top50gene) , ]
+pheatmap::pheatmap(mat, annotation_col = colData(dds)[,c("samplename","group")] %>% as.data.frame(), main = "top 50 genes", scale = "row",cluster_rows = TRUE,cluster_cols = FALSE, colorRampPalette(alpha(brewer.pal(n = 7, name = "YlOrBr"), alpha=0.9))(50)) 
+
+write.csv(res_dat, glue("zebrafish_DEGs_{igrp[2]}_vs_{igrp[1]}.csv"))
+
+```
+
+
