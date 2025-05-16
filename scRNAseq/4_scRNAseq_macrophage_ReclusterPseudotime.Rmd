@@ -1,0 +1,159 @@
+---
+title: "TB Reanalysis Macrophage clusters and Pseudotime"
+author: "Liuyang Wang"
+date: '`r format(Sys.time(), "%a %b %d %X %Y")`'
+output:
+  html_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 8
+    fontsize: 6pt
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# loading data
+
+```{r setup,include=FALSE, echo=FALSE}
+options(future.globals.maxSize = 1024 * 1024^2)
+suppressMessages({
+  require(ggplot2)
+  require(reshape2)
+  library(Seurat)
+  library(dplyr)
+  library(RColorBrewer)
+  require(glue)
+  require(stringr)
+  require(cowplot)
+  require(patchwork)
+  require(SeuratWrappers)
+  require(SeuratExtend)
+  require(ggforce)
+  require(scCustomize)
+  }
+)
+
+library(BiocParallel)
+register(MulticoreParam(workers = 6, progressbar = TRUE))
+
+```
+
+
+```{r load,cache=TRUE, fig.align='center', fig.height=5, fig.width=10}
+setwd("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/")
+
+## re-run 
+pbmc_all = readRDS("/Users/lw157/Desktop/AllPrjts_2023/Tobin_SpatialTB/2_intermediate_data/Tobin_8686_sndata_vj_snRNAseq.rds")
+
+DimPlot(pbmc_all, label = T, label.size = 8) + NoLegend()
+pbmc_all <- RenameIdents(object = pbmc_all, "0"	="T_CD4", "1"	="AT2",
+                     "2"	="Mac_IL4I1","3"	="T_CD8_cytotoxic", "4"	="Tmem_IL7R",
+                     "5"	="Fibro_TIMP1","6"	="T_cell","7"	="Mac_STAB1",
+                     "8"	="B_MS4A1", "9"	="Mac_GM2A","10"	="AT1",
+                    "11"	="Fibro_TNXB", "12"="Endothelial","13"=	"Plasma_BAZ_SDC1", 
+                    "14"	="Mac_SPP1","15"	="Treg_FOXP3", "16"	="Mitochondria_rich",
+                    "17"	="ML_B",  "18" = "Neutrophils_S100A8", 
+                    "19"	="Mac_FABP4",  
+                    "20"	="Mast","21"="Myofibroblast_ACTA2", 
+                    "22" = "Neutrophils_CXCL18", "23"= "Dendritic")
+
+pbmc_all@meta.data$cluster_annot = Idents(pbmc_all)
+pbmc_all@meta.data$sample = pbmc_all@meta.data$orig.ident
+DimPlot(pbmc_all, label = T, label.size = 4) + NoLegend()
+
+### feature plots and violin plot
+DefaultAssay(pbmc_all) <- "RNA"
+FeaturePlot(pbmc_all, features = c("SPP1" ),  order = T)
+```
+
+# Macrophage reclustering
+
+```{r, fig.width=10, fig.height=10}
+pal <- c( RColorBrewer::brewer.pal(8, "Dark2"),RColorBrewer::brewer.pal(9, "Set1"))
+
+pbmc = subset(pbmc_all, seurat_clusters %in% c(2, 7, 9, 14, 19))
+pbmc@meta.data$cluster_annot = droplevels(pbmc@meta.data$cluster_annot)
+
+gc()
+DefaultAssay(pbmc) <- "integrated"
+
+## First run
+rerun= TRUE
+{
+  pbmc <- pbmc %>%
+    ScaleData(vars.to.regress = c("nCount_RNA","percent.mt"), verbose = FALSE) %>%
+    RunPCA(  npcs = 20, verbose = FALSE) %>%
+    RunUMAP( reduction = "pca", dims = 1:15) %>%
+    FindNeighbors(reduction = "pca", dims = 1:15) %>%  # harmony
+    FindClusters(resolution = 0.4) %>%
+    identity()
+}
+
+DimPlot(pbmc, label = T, cols = pal, label.size = 8) + NoLegend()
+print("Re-clusters and how they match to old annotation\n")
+print(table(pbmc@meta.data$seurat_clusters, pbmc@meta.data$cluster_annot)  )
+FeaturePlot_scCustom(pbmc, features = c("IL4I1", "STAB1",  "SPP1", "FABP4"))
+FeaturePlot_scCustom(pbmc, features = c("IDO1", "STAB1",  "SPP1", "FABP4"))
+FeaturePlot_scCustom(pbmc, features = c("FABP4", "NLRP3","IL1B","CD163","MARCO","IL1B","CD86")) -> p
+p
+ggsave("Fig_marker.pdf", p, width = 8, height = 8)
+
+gc()
+pbmc.markers <- FindAllMarkers(pbmc,logfc.threshold = 0.2, only.pos = TRUE)
+
+pbmc.markers %>%
+    dplyr::group_by(cluster) %>%
+    #filter(p_val_adj < 1e-4) %>% 
+    #dplyr::arrange(desc(avg_log2FC)) %>% #head()
+    dplyr::filter(avg_log2FC  > 1 ) %>% 
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+
+toplot <- CalcStats(pbmc, features = top10$gene, method = "zscore", order = "p", n = 5)
+Heatmap(toplot, lab_fill = "zscore", plot.margin = margin(t=10, l = 10))-> p
+p
+ggsave("Fig_macrophage_recluster_snRNAseq_averageCluster.pdf", p, width = 6, height = 8)
+
+```
+
+# Pseudotime analysis
+```{r}
+mycols = c("orange", "purple","tan")
+pbmc <- SeuratExtend::RunSlingshot(pbmc, group.by = "seurat_clusters", reducedDim = "UMAP", start.clus = c("0"), assay = "integrated")
+sling <- as.data.frame(pbmc@misc$slingshot$UMAP$SlingPseudotime)
+pbmc@meta.data[,colnames(sling)] <- sling
+dsline = pbmc@misc$slingshot$UMAP$SlingshotDataSet
+
+graphic.off()
+pdf("Pyle_macrophage_slingshot_startcluster0_redo.pdf", width = 5, height = 5)
+plot(Embeddings(pbmc, "umap"), col =  alpha(RColorBrewer::brewer.pal(8,"Dark2")[pbmc@meta.data$seurat_clusters], 1), cex = 0.4, pch = 16, frame=F)
+lines(dsline, lwd = 3, col=mycols)
+dev.off()
+
+SeuratExtend::GeneTrendCurve.Slingshot(pbmc, features = c( "SPP1", "FABP4"), pseudotime.data = "UMAP")
+
+SeuratExtend::DimPlot2(pbmc, features = colnames(sling), cols = "C", split.by = "sample")
+SeuratExtend::GeneTrendHeatmap.Slingshot(pbmc, features = c(VariableFeatures(pbmc)[1:30]) %>% unique(), pseudotime.data = "UMAP",
+  lineage = "slingPseudotime_2") + labs(x="Top 30 most variable genes")
+
+
+## add arrow to curve
+for(ilin in 1:length(dsline@curves)){
+  print(glue("{ilin}"))
+  lin1_coord = dsline@curves[[glue("Lineage{ilin}")]]$s
+  s = round(dim(lin1_coord)[1]/5*4)
+  arrows(lin1_coord[s-1, "umap_1"], lin1_coord[s-1, "umap_2"], lin1_coord[s, "umap_1"], lin1_coord[s, "umap_2"], 
+         col = mycols[ilin], lwd=3, length = 0.15)
+}
+
+dev.off()
+
+```
+
