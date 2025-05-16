@@ -64,7 +64,6 @@ tx2gene<- gtf_df %>%
          select(transcript_id, gene_name) %>% 
    unique()
 write.csv(tx2gene, "tx2gene_zebrafish_GRCz11.csv", row.names = FALSE)
-
 ```
 
 ```{r}
@@ -90,11 +89,10 @@ write.csv(meta, "zebrafish_meta.csv")
 meta = read.csv("zebrafish_metadata.csv", row.names = 1)
 
 DT::datatable(meta, caption = "meta data")
-
 ```
 
 
-# DEGs
+# DEGs analysis
 ## Group 5 (Double positive Infect) vs Group 4 (Red positive)
 ```{r}
 
