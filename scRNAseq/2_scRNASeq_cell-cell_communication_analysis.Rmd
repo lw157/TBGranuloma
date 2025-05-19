@@ -1,0 +1,90 @@
+
+```{r}
+#load required packages
+library(CellChat)
+library(patchwork)
+library(umap)
+library(Seurat)
+options(stringsAsFactors = FALSE)
+
+
+#load data
+read_data1 = readRDS("All_sample_annotated.rds")
+
+#Create cellchat object
+Idents(read_data1) = read_data1$celltype
+data.input <- GetAssayData(read_data1, assay = "RNA", slot = "data") # normalized data matrix
+labels <- Idents(read_data1)
+meta <- data.frame(group = labels, row.names = names(labels)) # create a dataframe of the cell labels
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "group")
+
+#Cellchat database to usw
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+cellchat@DB <- CellChatDB.use
+
+# subset the expression data of signaling genes for saving computation cost
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- projectData(cellchat, PPI.human)
+cellchat <- computeCommunProb(cellchat)
+
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+#compute communication probabality
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+
+
+#Visualize interactions
+groupSize <- as.numeric(table(cellchat1@idents))
+#par(mfrow = c(1,2), xpd=TRUE)
+png(filename = "Number_interactions.png", res=600, width=7000, height = 7000)
+netVisual_circle(cellchat1@net$count, vertex.weight = groupSize, 
+                 weight.scale = T, label.edge= F, title.name = "Number of interactions",vertex.label.cex = 0.00001)
+dev.off()
+
+png(filename = "Interaction_weight.png", res=600, width=7000, height = 7000)
+netVisual_circle(cellchat1@net$weight, vertex.weight = groupSize, weight.scale = T,
+                 label.edge= F, title.name = "Interaction weights/strength",vertex.label.cex = 0.00001)
+dev.off()
+
+#Plot interactions by celltypes
+mat <- cellchat1@net$weight
+# Replace "/" with "_"
+new_row_names <- gsub("/", "-", rownames(mat))
+# Update the row names of the matrix
+rownames(mat) <- new_row_names
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  png(filename = paste0(rownames(mat)[i],"_interactions.png"), res=700, width = 6000, height = 6000)
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, 
+                   edge.weight.max = max(mat), title.name = rownames(mat)[i],vertex.label.cex = 0.0001)
+  dev.off()
+}
+
+# Compute the network centrality scores
+pathways.show <- cellchat@netP$pathways
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+# Visualize the computed centrality scores using heatmap, allowing ready identification of major signaling roles of cell groups
+png(filename = "Signaling_roles.png", res = 400, width=4800, height = 4800)
+netAnalysis_signalingRole_network(cellchat, signaling = pathways.show, width = 8, height = 2.5, font.size = 10)
+dev.off()
+
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", width = 10,height = 14,font.size = 12)
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming",width = 10,height = 14,font.size = 12)
+png(filename = "signaling_pathway_pattern.png", res=500, width =6000, height = 6000)
+ht1 + ht2
+dev.off()
+#
+
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+png(filename = "signaling_scatter.png", res=500, width =6000, height = 6000)
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+dev.off() 
+```
+
