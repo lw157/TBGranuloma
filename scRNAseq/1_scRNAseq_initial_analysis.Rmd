@@ -1,0 +1,220 @@
+
+```{r}
+#uploading required packages
+library(ggplot2)
+library(dplyr)
+library(Matrix)
+library(cowplot)
+library(Seurat)
+library(SoupX)
+library(clustree)
+library(scDblFinder)
+library(SingleCellExperiment)
+
+#Load Data & Create Seurat Object
+S10_5513_H3.data = Read10X_h5("10S_5513_H3/sample_filtered_feature_bc_matrix.h5")
+S10_5513_H3 = CreateSeuratObject(counts = S10_5513_H3.data,min.features=10,min.cells=10, project = "10S_5513_H3")
+S10_5513_H6.data = Read10X_h5("10S_5513_H6/sample_filtered_feature_bc_matrix.h5")
+S10_5513_H6 = CreateSeuratObject(counts = S10_5513_H6.data,min.features=10,min.cells=10, project = "10S_5513_H6")
+SP16_002655_A3.data = Read10X_h5("SP16_002655_A3/sample_filtered_feature_bc_matrix.h5")
+SP16_002655_A3 = CreateSeuratObject(counts = SP16_002655_A3.data,min.features=10,min.cells=10, project = "SP16_002655_A3")
+SP16_040417_B3.data = Read10X_h5("SP16_040417/sample_filtered_feature_bc_matrix.h5")
+SP16_040417_B3 = CreateSeuratObject(counts = SP16_040417_B3.data,min.features=200,min.cells=10, project = "SP16_040417_B3")
+
+#Create List of all 4 Sample Objects
+sample_list <- list("S10_5513_H3"=S10_5513_H3,  
+                    "SP16_002655_A3"=SP16_002655_A3,"SP16_040417_B3"=SP16_040417_B3,
+                    "S10_5513_H6" = S10_5513_H6)
+
+
+#Doublet removal
+sce_GH <- scDblFinder(GetAssayData(sample_list[[1]], slot="counts"))
+sample_list[[1]] <- AddMetaData(sample_list[[1]], metadata = sce_GH$scDblFinder.class, col.name = "class")
+sample_list[[1]] <- subset(sample_list[[1]], subset = class == "singlet")
+sce_GH <- scDblFinder(GetAssayData(sample_list[[2]], slot="counts"))
+sample_list[[2]] <- AddMetaData(sample_list[[2]], metadata = sce_GH$scDblFinder.class, col.name = "class")
+sample_list[[2]] <- subset(sample_list[[2]], subset = class == "singlet")
+sce_GH <- scDblFinder(GetAssayData(sample_list[[3]], slot="counts"))
+sample_list[[3]] <- AddMetaData(sample_list[[3]], metadata = sce_GH$scDblFinder.class, col.name = "class")
+sample_list[[3]] <- subset(sample_list[[3]], subset = class == "singlet")
+sce_GH <- scDblFinder(GetAssayData(sample_list[[4]], slot="counts"))
+sample_list[[4]] <- AddMetaData(sample_list[[4]], metadata = sce_GH$scDblFinder.class, col.name = "class")
+sample_list[[4]] <- subset(sample_list[[4]], subset = class == "singlet")
+
+
+#Percent Mitochondrial 
+sample_list <- lapply(X = sample_list, FUN = function(x) {
+  x <- PercentageFeatureSet(x, pattern = "^MT-", col.name = "percent.mt")
+})
+
+#Violin PLots for QC filtering
+for (i in 1:length(sample_list)) {
+  png(filename = paste0(sample_list[[i]]@project.name,"_violin_plot.png"),res=400,width=7200,height=2400)
+  p1 <- VlnPlot(object=sample_list[[i]],features = c("nCount_RNA", "nFeature_RNA","percent.mt"), ncol = 3)
+  print(p1)
+  dev.off()
+}
+
+#Cell filtering
+#***enter nGene low threshold***
+nUMI.low= 100
+#***enter nGene high threshold***
+nUMI.high= 10000
+#***enter %mito low threshold***
+percent_mito.low= -Inf
+#***enter %mito high threshold***
+percent_mito.high= 10
+#***enter %mito low threshold***
+nGene.low= 10
+#***enter %mito high threshold***
+nGene.high= 4000
+
+#subset cells
+for (i in 1:length(sample_list)) {
+  sample_list[[i]] <- subset(x = sample_list[[i]], subset = nFeature_RNA > nGene.low & nFeature_RNA < nGene.high & nCount_RNA > nUMI.low & nCount_RNA < nUMI.high & percent.mt < percent_mito.high)
+}
+
+#Post QC Violin Plots
+for (i in 1:length(sample_list)) {
+  png(filename = paste0(sample_list[[i]]@project.name,"_postfilter_violin_plot.png"),res=400,width=7200,height=2400)
+  p1 <- VlnPlot(object=sample_list[[i]],features = c("nCount_RNA", "nFeature_RNA","percent.mt"), ncol = 3)
+  print(p1)
+  dev.off()
+}
+#
+
+#cell cycle gene scoring
+g2m.genes <-cc.genes.updated.2019$g2m.genes 
+s.genes <- cc.genes.updated.2019$s.genes
+sample_list <- lapply(X = sample_list, FUN = function(x) {
+  x <- CellCycleScoring(x,s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+  x$CC.Difference <- x$S.Score - x$G2M.Score 
+  x <- SCTransform(x,vars.to.regress = c("percent.mt","CC.Difference"), verbose = TRUE)
+})
+
+
+#prepare data for integration
+features <- SelectIntegrationFeatures(object.list = sample_list, nfeatures = 3000)
+sample_list <- PrepSCTIntegration(object.list = sample_list, anchor.features = features)
+#find integration anchors and integrate data
+sample_list.anchors <- FindIntegrationAnchors(object.list = sample_list, normalization.method = "SCT",anchor.features = features)
+sample_list.combined <- IntegrateData(anchorset = sample_list.anchors, normalization.method = "SCT")
+
+# Perform an integrated analysis:
+DefaultAssay(object = sample_list.combined) <- "integrated"
+npcs= 100
+sample_list.combined <- RunPCA(object = sample_list.combined, verbose=T, npcs = npcs)
+sample_list.combined <- ProjectDim(object = sample_list.combined)
+png(file = "sample_list.combined_PC_Heatmap1.png",res=400,width=4800,height=9600)
+DimHeatmap(object = sample_list.combined, dims = 1:(npcs/2), cells = 500, balanced = TRUE, ncol = 5)
+dev.off()
+png(file = "sample_list.combined_PC_Heatmap2.png",res=400,width=4800,height=9600)
+DimHeatmap(object = sample_list.combined, dims = ((npcs/2)+1):npcs, cells = 500, balanced = TRUE, ncol = 5)
+dev.off()
+png(file = "sample_list.combined_ElbowPlot.png",res=400,width=4800,height=2400)
+ElbowPlot(object = sample_list.combined, ndims= npcs)
+dev.off()
+
+#
+#choose resolution and find clusters
+sample_list.combined <- FindNeighbors(sample_list.combined, reduction = "pca", dims = 1:30)
+sample_list.combined <- FindClusters(sample_list.combined, resolution = c(0.4,0.6,0.8,1.0,1.2))
+png(file="sample_list_clustree.png",res=400,width=4800, height=4800)
+clustree(sample_list.combined,prefix="integrated_snn_res.")
+dev.off()
+
+#Final resolution
+sample_list.combined <- FindClusters(sample_list.combined, resolution = 1.0)
+sample_list.combined <- RunUMAP(sample_list.combined, reduction = "pca", dims = 1:30)
+
+
+# Visualization:
+p1 <- DimPlot(object = sample_list.combined, reduction = "umap", 
+              group.by = "orig.ident", pt.size = 1.0, raster = FALSE)
+p2 <- DimPlot(object = sample_list.combined, reduction = "umap", 
+              label = TRUE, pt.size = 1.0, label.size = 4, raster = FALSE)
+png(file = "sample_list.combined_UMAP.png",res=600,width=4800,height=4800)
+print(p2)
+dev.off()
+png(file = "sample_list.combined_library.png",res=600,width=4800,height=4800)
+print(p1)
+dev.off()
+p3 <- DimPlot(object = sample_list.combined, reduction = "umap", 
+              group.by = "orig.ident",split.by = "orig.ident", pt.size = 1.0,ncol = 4)
+p4 <- DimPlot(object = sample_list.combined, reduction = "umap",
+              split.by = "orig.ident", label = TRUE, pt.size = 1.0, label.size = 6,ncol = 4)
+png(file = "sample_list.combined.split_UMAP.png",res=600,width=12000,height=4800)
+print(p4)
+dev.off()
+# Visualization:
+png(file = "sample_list.combined.split_library.png",res=600,width=12000,height=4800)
+print(p3)
+dev.off()
+png(filename="sample_list.combined_nGenes_plot.png",res=600,width=4800,height=4800)	
+FeaturePlot(sample_list.combined, features = "nFeature_RNA", cols = c("green", "blue"),pt.size = 1.2) #, cols = c("yellow", "red"))
+dev.off()
+png(filename="sample_list.combined_nCount_plot.png",res=600,width=4800,height=4800)	
+FeaturePlot(sample_list.combined, features = "nCount_RNA", cols = c("green", "blue"),pt.size = 1.2) #, cols = c("yellow", "red"))
+dev.off()
+png(filename="sample_list.combined_percentmt_plot.png",res=600,width=4800,height=4800)	
+FeaturePlot(sample_list.combined, features = "percent.mt", cols = c("green", "blue"),pt.size = 1.2) #, cols = c("yellow", "red"))
+dev.off()
+
+
+#Finding marker genes using RNA Assay
+DefaultAssay(sample_list.combined) <- "RNA"
+sample_list.combined <- NormalizeData(object = sample_list.combined,
+                                      normalization.method = "LogNormalize", scale.factor = 10000, verbose = TRUE)
+sample_list.combined <- ScaleData(object = sample_list.combined,
+                                  verbose = TRUE)
+
+# Finding differentially expressed features (cluster biomarkers):
+min.pct= 0.1
+thresh.use= 0.25
+test.use= "wilcox"
+sample_list.combined.markers <- FindAllMarkers(object = sample_list.combined, only.pos = TRUE, min.pct = min.pct, thresh.use = thresh.use, assay = "RNA")
+write.csv(sample_list.combined.markers, "sample_list.combined_DEmarkers.csv")
+
+# Heatmap of top 10 genes
+top10 <- sample_list.combined.markers %>% group_by(cluster) %>% top_n(n = 10, avg_log2FC)
+png(file = "sample_list.combined_GE_Heatmap_by_cluster.png",res=400,width=9600,height=4800)
+DoHeatmap(object = sample_list.combined, features = top10$gene, angle = 0, raster=TRUE) + NoLegend()
+dev.off()
+
+#Average gene expression
+avg_exp_sample_list.combined <- AverageExpression(sample_list.combined, assays = "RNA")
+write.csv(avg_exp_sample_list.combined, "Average_Expression_cluster_sample_list.combined.csv")
+top50 <- sample_list.combined.markers %>% group_by(cluster) %>% top_n(n = 50, avg_log2FC)
+write.csv(top50, "sample_list.combined_DEmarkers_top50.csv")
+
+#Cell Frequency
+y<-as.data.frame(sample_list.combined@reductions$umap@cell.embeddings)
+z<-as.data.frame(sample_list.combined@meta.data)
+w<-merge(y, z, by="row.names", all=TRUE)
+k <- w %>% count(orig.ident, Cluster)
+k <-count(df=w,vars=c("old.ident","Cluster"))
+write.csv(k, "sample_list.combined_countspercclusterbybatch.csv")
+write.csv(table(Idents(object = sample_list.combined)), "sample_list.combined_countsperccluster.csv")
+
+#Cell label based on Manual Annotation
+goi.use = c("Effector Helper T cells (CD4)","Type II pneumocytes","Macrophages (IL4I1/IDO1)","Cytotoxic T cells (CD8A)",
+"Memory helper T cells (IL7R)","Fibroblasts (TIMP1)","T cells","Macrophages (STAB1)","B cells (MS4A1)","Macrophages (GM2A)",
+"Type I pneumocytes","Fibroblasts (TNXB)","Endothelial cells","Plasma B cells (SDC1)","Macrophages (SPP1)","T cells (FOXP3)",
+"Mitochondrial rich","Ml-B cells","Neutrophils (S100A8/9)","Macrophages (FABP4)","Mast cells","MyoFibrobasts","Neutrophils (CXCL8)",
+"Dendritic cells")
+goi1.use = c(0:23)
+read_data1@active.ident <- plyr::mapvalues(x = read_data1@active.ident, from =goi1.use , to = goi.use)
+read_data1$celltype = read_data1@active.ident
+
+#Visualization
+png(filename = "Annotated_cells_combined.png", width = 6000, height = 6000, res = 600)
+DimPlot(read_data1, group.by = "celltype")
+dev.off()
+png(filename = "Annotated_cells_combined_lable.png", width = 8000, height = 5000, res = 600)
+DimPlot(read_data1, group.by = "celltype", label = T)
+dev.off()
+png(filename = "Annotated_cells_split.png", width = 12000, height = 8000, res = 600)
+DimPlot(read_data1, group.by = "celltype", label = F, split.by = "orig.ident", ncol = 2)
+dev.off()
+```
+
