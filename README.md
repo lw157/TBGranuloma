@@ -1,9 +1,9 @@
 # TBGranuloma
-This repository contains scripts for Charlie et al. 2025 mBio, including spatial snRNA-seq and scRNA-seq from human, bulk RNA-seq for zebrafish.
+This repository contains scripts for Pyle et al. 2025 mBio, including spatial snRNA-seq and scRNA-seq from human and a bulk RNA-seq from zebrafish.
 
 Reference:
 
-Charlie et al. (2025) Paired single-cell and spatial transcriptional profiling reveals a central osteopontin
+Pyle et al. (2025) Paired single-cell and spatial transcriptional profiling reveals a central osteopontin
 macrophage response mediating tuberculous granuloma formation in humans and
-zebrafish. _mBio (under review)_
+zebrafish. _mBio (accepted)_
 
