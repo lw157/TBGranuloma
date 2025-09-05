@@ -9,7 +9,11 @@ The scRNA-seq and spatial snRNA-seq data are available at Broad Single Cell Port
 
 The R Seurat object (*.rds) files for both scRNA-seq (Tobin_8686_sndata_vj_snRNAseq.rds) and spatial snRNA-seq (TB_4sample_combine_20230610.rds) can be downloaded from SCP "Download" link.
 
+As github has file size limiting to <25Mb, the spatial snRNA-seq raw count from SpaceRanger (*.h5) is made available via SCP portal *Miscellaneous*.
+
 The raw data files for spatial snRNA-seq are available at NCBI GEO: GSE296400, and scRNA-seq for GSE296399. 
+
+
 
 
 
