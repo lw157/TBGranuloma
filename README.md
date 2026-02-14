@@ -7,7 +7,7 @@ Pyle CJ, Wang L, Beerman RW, Jain V, Ohman HK, Thompson BA, Abramson KR, Ko DC, 
 
 The scRNA-seq and spatial snRNA-seq data are available at Broad Single Cell Portal: https://singlecell.broadinstitute.org/single_cell/study/SCP3268/paired-single-cell-and-spatial-transcriptional-profiling-reveals-a-central-osteopontin-macrophage-response-mediating-tuberculous-granuloma-formation. 
 
-The R Seurat object (*.rds) files for both scRNA-seq (Tobin_8686_sndata_vj_snRNAseq.rds) and spatial snRNA-seq (TB_4sample_combine_20230610.rds) can be downloaded from SCP "Download" link (free register account).
+The R Seurat object (*.rds) files for both scRNA-seq (Tobin_8686_sndata_vj_snRNAseq.rds) and spatial snRNA-seq (TB_4sample_combine_20230610.rds) can be downloaded from SCP "Download" link (free register account). The scRNA-seq (Tobin_8686_sndata_vj_snRNAseq.rds) was used as the reference during RCTD spatial deconvolution.
 
 As github has file size limiting to less than 25Mb, the spatial snRNA-seq raw count from SpaceRanger (*.h5) is made available via SCP portal under _Miscellaneous_.
 
